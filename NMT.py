@@ -10,7 +10,7 @@ dataset = load_dataset("wmt14", "fr-en", split="train[:1000000]")
 
 # Model Global Variables
 # ------------------------------------------------------------------------------
-vocab_size = 52257
+vocab_size = 50258
 encoder_block_size = 30
 decoder_block_size = 20
 d_model = 64
@@ -348,35 +348,24 @@ for iter in range(max_iters):
 # ------------------------------------------------------------------------------
 transformer.eval()
 
-
 @torch.no_grad
 def translate_sentence(transformer, sentence, max_length=decoder_block_size - 1):
-    encoder_input = (
-        torch.tensor(tokenizer.encode(sentence)).unsqueeze(0).to(device)
-    )  # Shape: [1, seq_len]
+    encoder_input = (torch.tensor(tokenizer.encode(sentence)).unsqueeze(0).to(device))  # Shape: [1, seq_len]
     encoder_outputs_mask = (encoder_input != pad_token_id).to(device)
     encoder_outputs = transformer.encoder(encoder_input)
 
-    decoder_input = torch.tensor(
-        [[eos_token_id]], dtype=torch.long, device=device
-    )  # Shape: [1, 1]
+    decoder_input = torch.tensor([[eos_token_id]], dtype=torch.long, device=device)  # Shape: [1, 1]
 
     # Start decoding loop
     for _ in range(max_length):
-        logits, _ = transformer.decoder(
-            decoder_input, encoder_outputs, encoder_outputs_mask, targets=None
-        )
+        logits, _ = transformer.decoder(decoder_input, encoder_outputs, encoder_outputs_mask, targets=None)
 
         # Get the next token (greedy decoding)
         next_token_logits = logits[:, -1, :]  # Get logits for the last time step
-        next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(
-            0
-        )  # Shape: [1, 1]
+        next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(0)  # Shape: [1, 1]
 
         # Append the predicted token to the decoder input
-        decoder_input = torch.cat(
-            [decoder_input, next_token_id], dim=1
-        )  # Shape: [1, current_seq_len + 1]
+        decoder_input = torch.cat([decoder_input, next_token_id], dim=1)  # Shape: [1, current_seq_len + 1]
 
         # Check if the <EOS> token is generated
         if next_token_id.item() == eos_token_id:
