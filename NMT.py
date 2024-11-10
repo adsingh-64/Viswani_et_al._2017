@@ -330,16 +330,21 @@ decoder_inputs = decoder_inputs.to(device)
 decoder_labels = decoder_labels.to(device)
 
 transformer = Transformer().to(device)
+transformer = torch.compile(transformer)
 
 optimizer = torch.optim.AdamW(transformer.parameters(), lr=6e-4)
 max_iters = 50000
 eval_iter = 2000
 
+num_batches = dataset.num_rows // batch_size
+num_epochs = max_iters // num_batches
+print(f"Number of epochs: {num_epochs}")
+
 for iter in range(max_iters):
     enc_inputs, dec_inputs, dec_labels = get_batch()
     logits, loss = transformer(enc_inputs, dec_inputs, dec_labels)
     if iter % eval_iter == 0:
-        print(f"Loss: {loss.item()}")
+        print(f"Step {iter} | Loss: {loss.item()}")
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
@@ -348,41 +353,74 @@ for iter in range(max_iters):
 # ------------------------------------------------------------------------------
 transformer.eval()
 
-@torch.no_grad
-def translate_sentence(transformer, sentence, max_length=decoder_block_size - 1):
-    encoder_input = (torch.tensor(tokenizer.encode(sentence)).unsqueeze(0).to(device))  # Shape: [1, seq_len]
-    encoder_outputs_mask = (encoder_input != pad_token_id).to(device)
-    encoder_outputs = transformer.encoder(encoder_input)
 
-    decoder_input = torch.tensor([[eos_token_id]], dtype=torch.long, device=device)  # Shape: [1, 1]
+class Hypothesis:
+    def __init__(self, tokens, log_prob, length):
+        self.tokens = tokens
+        self.log_prob = log_prob
+        self.length = length
 
-    # Start decoding loop
-    for _ in range(max_length):
-        logits, _ = transformer.decoder(decoder_input, encoder_outputs, encoder_outputs_mask, targets=None)
-
-        # Get the next token (greedy decoding)
-        next_token_logits = logits[:, -1, :]  # Get logits for the last time step
-        next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(0)  # Shape: [1, 1]
-
-        # Append the predicted token to the decoder input
-        decoder_input = torch.cat([decoder_input, next_token_id], dim=1)  # Shape: [1, current_seq_len + 1]
-
-        # Check if the <EOS> token is generated
-        if next_token_id.item() == eos_token_id:
-            break
-
-    # Remove the initial <EOS> token from the decoder input since this is the translation
-    output_tokens = decoder_input[0, 1:].tolist()
-
-    # Decode the tokens to English text
-    translation = tokenizer.decode(output_tokens, errors="replace")
-    return translation
+    def get_score(self, alpha=0.6):
+        return self.log_prob / (self.length**alpha)
 
 
-french_sentence = "Bonjour tout le monde!"
+sentence = "Bonjour tout le monde!"
+encoder_inputs = torch.tensor(tokenizer.encode(sentence)).unsqueeze(0).to(device)
+encoder_outputs_mask = (encoder_inputs != pad_token_id).to(device)
+encoder_outputs = transformer.encoder(encoder_inputs)
 
-# Translate the sentence
-translation = translate_sentence(transformer, french_sentence)
+k = 4
+
+initial_hypothesis = Hypothesis([eos_token_id], 0.0, 1)
+beam = [initial_hypothesis]
+completed_hypotheses = []
+
+for _ in range(
+    decoder_block_size - 1
+):  # predefined cutoff, when it runs the decoder_block_sizeth time, the decoder input will be decoder_block_size length
+    new_beam = []
+    for hypothesis in beam:
+        decoder_input = torch.tensor(
+            [hypothesis.tokens], dtype=torch.long, device=device
+        )
+
+        with torch.no_grad():
+            logits, _ = transformer.decoder(
+                decoder_input, encoder_outputs, encoder_outputs_mask, targets=None
+            )
+
+        next_token_logits = logits[:, -1, :].view(-1)
+        next_token_log_probs = F.log_softmax(next_token_logits, dim=-1)
+
+        top_k_log_probs, top_k_indices = torch.topk(next_token_log_probs, k)  # both [k]
+        next_tokens = top_k_indices.tolist()
+        next_token_log_probs = top_k_log_probs.tolist()
+
+        for token, log_prob in zip(next_tokens, next_token_log_probs):
+            new_tokens = hypothesis.tokens + [token]
+            new_log_prob = hypothesis.log_prob + log_prob
+            new_length = hypothesis.length + 1
+            new_hypothesis = Hypothesis(new_tokens, new_log_prob, new_length)
+
+            if token == eos_token_id or len(new_tokens) > decoder_block_size:
+                completed_hypotheses.append(new_hypothesis)
+            else:
+                new_beam.append(new_hypothesis)
+
+    if not new_beam:  # stop early if all hypotheses have been completed
+        break
+
+    beam = sorted(new_beam, key=lambda h: h.get_score(), reverse=True)[:k]  # keep top k
+
+if completed_hypotheses:
+    best_hypothesis = max(completed_hypotheses, key=lambda h: h.get_score())
+else:  # if not completed hypotheses, then beam must be non-empty so if-else partitions event space
+    best_hypothesis = max(beam, key=lambda h: h.get_score())
+
+output_tokens = best_hypothesis.tokens[1:]
+
+translation = tokenizer.decode(output_tokens, errors="replace")
+
 print(f"Translation: {translation}")
 
 """
